@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createGameBridge } from "@ifsoul/adapter-sdk/bridge";
+import { createActions } from "./actions.mjs";
 export function attachConnector(bot, config, transport, receipt = () => {}) {
   let epoch = 0,
     bridge,
@@ -19,9 +20,35 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
     bot.on(name, fn);
     listeners.push([name, fn]);
   };
+  let actionRevision = 0;
+  const actions = createActions(bot, config, (action, result) => {
+    record("action-outcome", { action, result });
+    const observation = {
+      id: randomUUID(),
+      summary: `Minecraft host ended ${action}: ${result}.`,
+      kind: "outcome",
+      actor: "agent",
+      observer: "host",
+      recipient: "user",
+    };
+    bridge?.report(observation);
+    void config
+      .reportAction?.({ id: observation.id, action, result })
+      .catch(() => {
+        record("action-outcome-report-failed", { action, result });
+      });
+    if (
+      ready &&
+      binding(config.playerName) &&
+      ["arrived", "target-died", "expired", "unreachable"].includes(result)
+    )
+      bot.whisper(config.playerName, observation.summary);
+  });
   const invalidate = (reason) => {
+    actionRevision++;
     epoch++;
     ready = false;
+    actions.stop();
     queue.length = 0;
     controller?.abort();
     bridge?.dispose();
@@ -47,9 +74,23 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
           continue;
         let timer;
         try {
+          const options = actions.snapshot();
+          const boundPlayer = actions.player();
+          const revision = actionRevision;
           calls++;
+          const decision = options.length
+            ? current.decide({
+                requestId: item.id,
+                context: item.message,
+                choices: [
+                  { id: "none", label: "Reply without taking any action" },
+                  ...options.map(({ id, label }) => ({ id, label })),
+                ],
+                fallbackChoiceId: "none",
+              })
+            : current.chat(item.message);
           const reply = await Promise.race([
-            current.chat(item.message),
+            decision,
             new Promise((_, reject) => {
               timer = setTimeout(
                 () => reject(Error("deadline")),
@@ -69,10 +110,31 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
               invalidate("deadline");
             continue;
           }
+          if (revision !== actionRevision) continue;
           if (reply.source === "fallback") {
             invalidate("fallback");
             continue;
           }
+          const choice = options.find(({ id }) => id === reply.choiceId);
+          if (choice && revision === actionRevision) {
+            if (config.validateActions) await config.validateActions();
+            if (
+              ready &&
+              !stopped &&
+              item.epoch === epoch &&
+              revision === actionRevision &&
+              Date.now() < item.deadline &&
+              binding(item.name)
+            ) {
+              const started = actions.execute(choice, boundPlayer);
+              bot.whisper(
+                item.name,
+                started ? "Action started." : "Action could not start.",
+              );
+              continue;
+            }
+          }
+          if (choice) continue;
           const text = reply.speech;
           if (
             typeof text !== "string" ||
@@ -130,6 +192,10 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
     });
     record("ready");
   };
+  on("physicsTick", actions.tick);
+  on("goal_reached", actions.reached);
+  on("path_update", actions.path);
+  on("entityDead", actions.dead);
   on("spawn", activate);
   for (const event of ["death", "respawn", "end", "kicked", "error"])
     on(event, () => invalidate(event));
@@ -152,6 +218,16 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
       /[\p{Cc}\p{Cf}]/u.test(message)
     )
       return;
+    if (
+      config.actions?.includes("movement") &&
+      ["!ifsoul stop", "!ifsoul wait"].includes(message)
+    ) {
+      actionRevision++;
+      queue.length = 0;
+      actions.stop();
+      bot.whisper(name, "Movement stopped.");
+      return;
+    }
     const consent =
       message === "!ifsoul allow-history"
         ? true
@@ -213,7 +289,14 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
       for (const [name, fn] of listeners) bot.removeListener(name, fn);
     },
     status() {
-      return { epoch, ready, queued: queue.length, active, calls };
+      return {
+        epoch,
+        ready,
+        queued: queue.length,
+        active,
+        calls,
+        ...(config.actions ? { acting: actions.acting } : {}),
+      };
     },
   };
 }

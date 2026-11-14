@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import mineflayer from "mineflayer";
 import { BridgeRequestError } from "@ifsoul/adapter-sdk/bridge";
+import { loadActionPlugins } from "./actions.mjs";
 import { attachConnector } from "./connector.mjs";
 const clean = (code, message) => ({ error: { code, message } });
 const same = (a, b) =>
@@ -150,6 +151,7 @@ export async function startCompanion(options = {}) {
   }
   async function remote(path, body, credential = config?.token) {
     const endpoint = serviceOrigin(config.serviceEndpoint);
+    const check = body.operation === "action-check";
     const response = await fetch(endpoint + "/api/game/device/" + path, {
       method: "POST",
       redirect: "error",
@@ -157,7 +159,9 @@ export async function startCompanion(options = {}) {
         path === "ready" || path === "dialogue"
           ? AbortSignal.any([
               activeRequest.signal,
-              AbortSignal.timeout(path === "dialogue" ? 65000 : 10000),
+              AbortSignal.timeout(
+                check ? 1500 : path === "dialogue" ? 65000 : 10000,
+              ),
             ])
           : AbortSignal.timeout(10000),
       headers: {
@@ -197,8 +201,11 @@ export async function startCompanion(options = {}) {
     }
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   }
+  let actionLease;
   let activeRequest = new AbortController();
   function stop() {
+    clearInterval(actionLease);
+    actionLease = undefined;
     activeRequest.abort();
     activeRequest = new AbortController();
     epoch++;
@@ -226,6 +233,8 @@ export async function startCompanion(options = {}) {
           hideErrors: true,
         });
     bot = current;
+    if (config.connection.actions?.includes("movement"))
+      loadActionPlugins(current);
     current.on("error", () => {
       if (generation !== epoch) return;
       error =
@@ -255,11 +264,36 @@ export async function startCompanion(options = {}) {
             (p) => p.name === config.minecraft.playerName,
           );
           if (player) {
-            const ready = await remote("ready", { player });
+            const ready = await remote("ready", {
+              player,
+              ...(config.connection.actions?.includes("movement")
+                ? {
+                    actionCapabilities: current.pathfinder
+                      ? ["movement", ...(current.pvp ? ["defense"] : [])]
+                      : [],
+                  }
+                : {}),
+            });
             if (generation !== epoch) return;
             config.connection = ready.connection;
             await persist();
+            const actionRevision = config.connection.revision;
+            const validateActions = async () => {
+              const proof = await remote("dialogue", {
+                operation: "action-check",
+              });
+              if (
+                generation !== epoch ||
+                proof.authorized !== true ||
+                proof.revision !== actionRevision
+              )
+                throw Error("stale");
+            };
             const cfg = {
+              actions: config.connection.activeActions,
+              validateActions,
+              reportAction: (outcome) =>
+                remote("dialogue", { operation: "action-outcome", ...outcome }),
               playerName: player.name,
               playerUuid: player.uuid,
               worldId: config.connection.hostId,
@@ -283,6 +317,9 @@ export async function startCompanion(options = {}) {
                   reply = await remote("dialogue", {
                     requestId: request.requestId,
                     text: request.context,
+                    ...(request.operation === "decide"
+                      ? { operation: "decide", choices: request.choices }
+                      : {}),
                   });
                 } catch {
                   throw new BridgeRequestError();
@@ -326,6 +363,26 @@ export async function startCompanion(options = {}) {
               },
             );
             connector.start();
+            if (cfg.actions?.includes("movement")) {
+              let inFlight = false;
+              actionLease = setInterval(async () => {
+                if (inFlight || !connector?.status().acting) return;
+                inFlight = true;
+                try {
+                  await validateActions();
+                } catch {
+                  if (generation === epoch) {
+                    stop();
+                    phase = "error";
+                    error =
+                      "The gameplay grant could not be verified. Reconnect or renew the grant.";
+                  }
+                } finally {
+                  inFlight = false;
+                }
+              }, 1000);
+              actionLease.unref();
+            }
             return;
           }
           await new Promise((r) => setTimeout(r, 500));

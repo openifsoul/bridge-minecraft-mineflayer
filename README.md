@@ -1,8 +1,8 @@
 # IfSoul Mineflayer bridge
 
 One Mineflayer player client connects a selected player to an IfSoul character
-through private text whispers. Games own movement, combat, pathfinding and actions;
-the bridge forwards bounded dialogue and observations.
+through private text whispers. With a separate gameplay grant, the Mineflayer
+client executes bounded Minecraft actions using native plugins and reports outcomes.
 
 Verified private Minecraft whisper through installed IfSoul Desktop and local
 Ollama. The connector accepts only the approved player's private whisper,
@@ -32,7 +32,7 @@ This path supports authorized Java Minecraft1.20.2 servers in explicit trusted o
 
 Use App **Start**, **Stop**, **Reconnect**, **Clear** and **Revoke**. The native credential expires after one hour; renew through the App. Stop/reconnect fence pending work and never replay uncertain sends. Clear requests remote revocation before removing local settings; unavailable remote confirmation is reported. Re-approving another App origin redacts the previous binding and requires explicit clear, without copying memory. Same-target/profile/memory provider renewal preserves the server-owned host identity and private memory.
 
-Generated settings live under `~/.ifsoul/minecraft` with restricted permissions; operators can set `IFSOUL_COMPANION_DATA_DIR`. Unsupported stored configuration fails without changing it. Only approved private whispers reach the selected character, and output remains a short non-command line. Movement, combat and game mechanics stay with Minecraft.
+Generated settings live under `~/.ifsoul/minecraft` with restricted permissions; operators can set `IFSOUL_COMPANION_DATA_DIR`. Unsupported stored configuration fails without changing it. Only approved private whispers reach the selected character, and output remains a short non-command line.
 
 ```mermaid
 stateDiagram-v2
@@ -48,9 +48,36 @@ stateDiagram-v2
   Revoked --> Paired: New explicit owner approval
 ```
 
+## Gameplay capabilities
+
+| Capability | Operator approval | Execution |
+| --- | --- | --- |
+| Private dialogue | Private dialogue grant | Bound player only |
+| Follow and walk | Movement permission | Pathfinder follows the bound player, walks to their snapshotted position, or walks to a nearby cardinal point |
+| Stop or wait | Movement permission | Send `/tell TaviBot !ifsoul stop` or `/tell TaviBot !ifsoul wait` for immediate cancellation |
+| Hostile-mob defense | Movement and defense permissions | The PvP plugin can engage one nearby allowlisted hostile mob selected by the host |
+
+Save and start with an App and companion that both support gameplay. Enable
+movement explicitly. Defending against mobs requires its own opt-in. Ask in the
+same private whisper you use for dialogue, for example `Follow me` or `Walk five
+blocks east`. A provider chooses a structured ID from the host's available
+options. The local scenario provider always chooses dialogue.
+
+Each action gets at most 12 seconds and is bounded to 24 blocks. Movement
+does not dig or place blocks. A player UUID change, death, dimension change,
+disconnect, missed grant verification or an explicit stop clears work. The
+reported mob death is observed by the host and does not assert who killed it.
+Player attacks, block collection, building and arbitrary commands are outside
+this action set.
+
+Pathfinder 2.4.5 and PvP 1.3.2 passed a headless disposable Java 1.20.2 exercise
+with synthetic structured decisions. Real-provider and installed-release gameplay
+verification are separate.
+
 ## Advanced file-driven local test
 
-The original CLI remains available for developer-operated isolated tests:
+The original CLI provides dialogue for developer-operated isolated tests.
+Gameplay uses App companion grants.
 
 Use a loopback Java Minecraft1.20.2 server with pinned Mineflayer4.39.0 and a
 compatible Java runtime. The CLI does not download a server, Java runtime or model,

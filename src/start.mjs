@@ -16,6 +16,7 @@ if (c.host !== '127.0.0.1' || c.version !== '1.20.2' || c.auth !== 'offline' || 
  typeof c.character?.temperament !== 'string' || !c.character.temperament || c.character.temperament.length > 160 ||
  !Number.isInteger(c.deadlineMs) || c.deadlineMs < 1000 || c.deadlineMs > 150000 ||
  !Number.isInteger(c.cooldownMs) || c.cooldownMs < 1000 || !Number.isInteger(c.maxCalls) || c.maxCalls < 1 || c.maxCalls > 10) throw Error('Invalid bounded local configuration');
+if (c.actions !== undefined) throw Error('Gameplay actions require an explicit App companion grant');
 if (c.bridgeLimits !== undefined) resolveBridgeLimits(c.bridgeLimits);
 if (c.deadlineMs > 60000 && c.bridgeLimits?.timeoutMs !== c.deadlineMs) throw Error('Extended deadline requires coherent explicit SDK policy');
 let transport = async (request) => scenarioResponse(request);
