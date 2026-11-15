@@ -4,10 +4,10 @@ One Mineflayer player client connects a selected player to an IfSoul character
 through private text whispers. With a separate gameplay grant, the Mineflayer
 client executes bounded Minecraft actions using native plugins and reports outcomes.
 
-Verified private Minecraft whisper through installed IfSoul Desktop and local
-Ollama. The connector accepts only the approved player's private whisper,
-tracks roster/spawn and lifecycle changes, and returns one private reply.
-It does not target native server NPCs, group dialogue or public chat.
+The individual connector accepts private whispers from the approved player,
+tracks roster, spawn and lifecycle changes, and returns one private reply.
+The separate [group host](#mineflayer-groups) coordinates two or three
+Mineflayer clients on the same server.
 
 ## Install
 
@@ -125,3 +125,30 @@ IFSOUL_DISPOSABLE_TEST_APPROVED=yes node scripts/native-safety.mjs
 
 The harness creates its own clients/server and closes them after checking lifecycle,
 queue, timeout and private-message behavior. It sends no model requests.
+
+## Mineflayer groups
+
+Create the group in local IfSoul **Games → Minecraft → Mineflayer group**.
+Save the approved setup JSON to a private file and run the group host from
+this checkout on the same computer as the App.
+
+```sh
+pnpm group /path/to/group.json
+```
+
+The group host runs the authorized clients in the same trusted Minecraft
+Java 1.20.2 world. Each bot's pathfinder executes its own bounded survey step
+and reports the observed result to the App. Each member retains its own
+private conversation with the approved player. A separate grant can allow
+bounded survey cadence when no player is present. See the [App group guide](https://github.com/openifsoul/app/blob/main/docs/game-connections.md#run-a-mineflayer-group)
+for grant setup, group and addressed messages, movement limits, player-absent
+cadence and member removal.
+
+## Continue in local App Conversation
+
+The approved player can whisper `!ifsoul allow-app-chat` to an individual
+companion to let the local App operator continue in that player's context.
+Linked Conversation can use this connection's private history and update the
+character's relationship with that player. Withdraw this permission with
+`!ifsoul deny-app-chat`. Owner history inspection has a separate grant. See
+the [App memory guide](https://github.com/openifsoul/app/blob/main/docs/memory.md#continue-as-a-mineflayer-player-in-conversation).

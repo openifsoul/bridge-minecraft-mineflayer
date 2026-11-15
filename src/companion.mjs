@@ -306,6 +306,10 @@ export async function startCompanion(options = {}) {
                 if (generation !== epoch) return Promise.reject(Error("stale"));
                 return remote("history-consent", { allowed });
               },
+              continuityConsent: (allowed) => {
+                if (generation !== epoch) return Promise.reject(Error("stale"));
+                return remote("continuity-consent", { allowed });
+              },
             };
             connector = attachConnector(
               current,

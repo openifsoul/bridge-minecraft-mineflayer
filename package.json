@@ -1,6 +1,6 @@
 {
   "name": "ifsoul-minecraft-bridge",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -8,12 +8,13 @@
   },
   "packageManager": "pnpm@10.15.0",
   "scripts": {
-    "check": "node scripts/check-version.mjs && node --check src/start.mjs && node --test",
+    "check": "node scripts/check-version.mjs && node --check src/start.mjs && node --check src/group.mjs && node --test",
     "start": "node src/start.mjs",
-    "companion": "node src/companion.mjs"
+    "companion": "node src/companion.mjs",
+    "group": "node src/group.mjs"
   },
   "dependencies": {
-    "@ifsoul/adapter-sdk": "file:vendor/release070-4ec77e9b0ae5/ifsoul-adapter-sdk-0.7.0.tgz",
+    "@ifsoul/adapter-sdk": "file:vendor/release080-09b15a20d5af/ifsoul-adapter-sdk-0.8.0.tgz",
     "mineflayer": "4.39.0",
     "mineflayer-pathfinder": "2.4.5",
     "mineflayer-pvp": "1.3.2"

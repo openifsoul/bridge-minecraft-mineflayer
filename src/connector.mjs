@@ -228,31 +228,38 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
       bot.whisper(name, "Movement stopped.");
       return;
     }
-    const consent =
-      message === "!ifsoul allow-history"
-        ? true
-        : message === "!ifsoul deny-history"
-          ? false
-          : undefined;
-    if (consent !== undefined && config.historyConsent) {
+    const command = /^!ifsoul (allow|deny)-(history|app-chat)$/.exec(message);
+    if (command) {
+      const consent = command[1] === "allow";
+      const history = command[2] === "history";
+      const update = history ? config.historyConsent : config.continuityConsent;
+      if (!update) return;
       if (updatingConsent) return;
       updatingConsent = true;
       const consentEpoch = epoch;
-      void config
-        .historyConsent(consent)
+      void update(consent)
         .then(
           () => {
             if (ready && !stopped && epoch === consentEpoch && binding(name))
               bot.whisper(
                 name,
-                consent
-                  ? "App owner history inspection enabled for this connection."
-                  : "App owner history inspection disabled for this connection.",
+                history
+                  ? consent
+                    ? "App owner history inspection enabled for this connection."
+                    : "App owner history inspection disabled for this connection."
+                  : consent
+                    ? "App Conversation can use this connection’s memories and continue as you. Linked chat can update your relationship with the bot."
+                    : "App Conversation can no longer continue as you for this connection.",
               );
           },
           () => {
             if (ready && !stopped && epoch === consentEpoch && binding(name))
-              bot.whisper(name, "The history permission could not be changed.");
+              bot.whisper(
+                name,
+                history
+                  ? "The history permission could not be changed."
+                  : "The App Conversation permission could not be changed.",
+              );
           },
         )
         .finally(() => {

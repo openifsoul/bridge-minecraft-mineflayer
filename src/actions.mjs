@@ -87,7 +87,11 @@ export function createActions(bot, config, report) {
     return choices;
   }
   function safe(job) {
-    if (job.player !== player() || !nearby(job.player, MAX_DISTANCE))
+    if (
+      job.groupPermit
+        ? !job.groupPermit()
+        : job.player !== player() || !nearby(job.player, MAX_DISTANCE)
+    )
       return false;
     if (bot.entity.position.distanceTo(job.origin) > MAX_DISTANCE) return false;
     if (
@@ -100,7 +104,7 @@ export function createActions(bot, config, report) {
       !job.point || bot.entity.position.distanceTo(job.point) <= MAX_DISTANCE
     );
   }
-  function execute(choice, boundPlayer) {
+  function begin(choice, boundPlayer) {
     if (!movement() || !choice || active || !bot.entity?.position) return false;
     const job = {
       ...choice,
@@ -147,7 +151,18 @@ export function createActions(bot, config, report) {
       return Boolean(active);
     },
     snapshot,
-    execute,
+    execute: begin,
+    survey(direction, permit) {
+      const heading = directions.find(([name]) => name === direction);
+      if (!heading || typeof permit !== "function" || !bot.entity?.position)
+        return false;
+      const [id, x, z] = heading;
+      return begin({
+        id,
+        point: bot.entity.position.floored().offset(x * 5, 0, z * 5),
+        groupPermit: permit,
+      });
+    },
     player,
     stop: () => finish("stopped"),
     tick() {
