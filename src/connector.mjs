@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createGameBridge } from "@ifsoul/adapter-sdk/bridge";
 import { createActions } from "./actions.mjs";
+import { createResourceActions, nativeIntent } from "./capabilities.mjs";
 export function attachConnector(bot, config, transport, receipt = () => {}) {
   let epoch = 0,
     bridge,
@@ -20,7 +21,14 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
     bot.on(name, fn);
     listeners.push([name, fn]);
   };
+  async function whisper(name, text) {
+    const before = epoch;
+    if (config.canSpeak && !(await config.canSpeak())) return;
+    if (before === epoch && ready && !stopped && binding(name)) bot.whisper(name, text);
+  }
+
   let actionRevision = 0;
+  let typedMovement;
   const actions = createActions(bot, config, (action, result) => {
     record("action-outcome", { action, result });
     const observation = {
@@ -32,7 +40,21 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
       recipient: "user",
     };
     bridge?.report(observation);
-    void config
+    const typed = typedMovement;
+    if (typed?.movement === action) {
+      typedMovement = undefined;
+      void config.reportCapability({
+        id: typed.request.id,
+        reportId: observation.id,
+        providerId: typed.request.providerId,
+        intentId: typed.request.intentId,
+        status: ["arrived", "target-died"].includes(result)
+          ? "succeeded"
+          : ["stopped", "interrupted"].includes(result) ? "cancelled" : "failed",
+        steps: [{ stepId: "native-result", summary: observation.summary }],
+      }).catch(() => config.capabilityReportFailed?.(typed.request.id));
+    }
+    if (!typed) void config
       .reportAction?.({ id: observation.id, action, result })
       .catch(() => {
         record("action-outcome-report-failed", { action, result });
@@ -42,13 +64,15 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
       binding(config.playerName) &&
       ["arrived", "target-died", "expired", "unreachable"].includes(result)
     )
-      bot.whisper(config.playerName, observation.summary);
+      void whisper(config.playerName, observation.summary);
   });
+  const resources = createResourceActions(bot, config, (line) => { void whisper(config.playerName, line); });
   const invalidate = (reason) => {
     actionRevision++;
     epoch++;
     ready = false;
     actions.stop();
+    resources.stop(reason);
     queue.length = 0;
     controller?.abort();
     bridge?.dispose();
@@ -59,6 +83,38 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
     name === config.playerName &&
     name !== bot.username &&
     bot.players?.[name]?.uuid === config.playerUuid;
+  const permission = (id) => {
+    const session = config.capabilitySession?.();
+    if (!session) return true;
+    const intentId = nativeIntent(id);
+    return session.expiresAt > Date.now() &&
+      session.allowedIntentIds.includes(intentId) &&
+      session.manifest.capabilities.some((row) =>
+        row.intentId === intentId && row.readiness === "ready");
+  };
+  async function checkMovement(job) {
+    if (!job) {
+      await config.validateActions?.();
+      return;
+    }
+    const authorized = await config.checkCapability({
+      ...job.request, checkpoint: ++job.checkpoint,
+    });
+    if (!authorized) throw Error("stale");
+  }
+
+  function reportUnstarted(job, status, summary) {
+    if (!job) return;
+    void config.reportCapability({
+      id: job.request.id,
+      reportId: randomUUID(),
+      providerId: job.request.providerId,
+      intentId: job.request.intentId,
+      status,
+      steps: [{ stepId: "native-result", summary }],
+    }).catch(() => config.capabilityReportFailed?.(job.request.id));
+  }
+
   async function drain() {
     if (active || stopped) return;
     active = true;
@@ -74,7 +130,7 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
           continue;
         let timer;
         try {
-          const options = actions.snapshot();
+          const options = resources.acting ? [] : actions.snapshot().filter(({ id }) => permission(id));
           const boundPlayer = actions.player();
           const revision = actionRevision;
           calls++;
@@ -117,22 +173,48 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
           }
           const choice = options.find(({ id }) => id === reply.choiceId);
           if (choice && revision === actionRevision) {
-            if (config.validateActions) await config.validateActions();
+            const session = config.capabilitySession?.();
+            const pendingMovement = session && {
+              movement: choice.id,
+              checkpoint: 0,
+              request: {
+                id: item.id,
+                providerId: session.providerId,
+                manifestRevision: session.manifest.revision,
+                policyRevision: session.policyRevision,
+                intentId: nativeIntent(choice.id),
+                arguments: [],
+              },
+            };
+            if (!permission(choice.id) || (config.canReact && !config.canReact())) continue;
+            try {
+              await checkMovement(pendingMovement);
+            } catch {
+              void whisper(item.name, "Game action permission was denied.");
+              continue;
+            }
             if (
               ready &&
               !stopped &&
               item.epoch === epoch &&
               revision === actionRevision &&
               Date.now() < item.deadline &&
-              binding(item.name)
+              binding(item.name) &&
+              !resources.acting
             ) {
+              typedMovement = pendingMovement;
               const started = actions.execute(choice, boundPlayer);
-              bot.whisper(
+              if (!started && typedMovement && pendingMovement === typedMovement) {
+                typedMovement = undefined;
+                reportUnstarted(pendingMovement, "failed", "Minecraft host could not start the selected action.");
+              }
+              void whisper(
                 item.name,
                 started ? "Action started." : "Action could not start.",
               );
               continue;
             }
+            reportUnstarted(pendingMovement, "cancelled", "Minecraft host stopped the pending action before execution.");
           }
           if (choice) continue;
           const text = reply.speech;
@@ -146,6 +228,8 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
             record("dropped", { reason: "unsafe-output" });
             continue;
           }
+          if (config.canSpeak && !(await config.canSpeak())) continue;
+          if (!ready || stopped || item.epoch !== epoch || !binding(item.name)) continue;
           bot.whisper(item.name, text);
           current.report({
             id: randomUUID(),
@@ -207,7 +291,7 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
   on("playerLeft", (player) => {
     if (player.uuid === config.playerUuid) invalidate("recipient-left");
   });
-  on("whisper", (name, message) => {
+  on("whisper", async (name, message) => {
     if (
       !ready ||
       stopped ||
@@ -219,15 +303,26 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
     )
       return;
     if (
-      config.actions?.includes("movement") &&
+      (config.actions?.includes("movement") || config.resourcePolicy) &&
       ["!ifsoul stop", "!ifsoul wait"].includes(message)
     ) {
       actionRevision++;
       queue.length = 0;
       actions.stop();
-      bot.whisper(name, "Movement stopped.");
+      resources.stop();
+      void whisper(name, config.resourcePolicy ? "Game action stopped." : "Movement stopped.");
       return;
     }
+    const commandEpoch = epoch;
+    if (config.canListen && !(await config.canListen())) return;
+    if (commandEpoch !== epoch || !ready || stopped || !binding(name)) return;
+    const boundEntity = bot.players[name]?.entity;
+    if ((!config.canReact || config.canReact()) && resources.command(
+      message,
+      () => ready && !stopped && commandEpoch === epoch && binding(name) &&
+        boundEntity?.isValid && bot.players[name]?.entity === boundEntity,
+      () => !actions.acting && !active,
+    )) return;
     const command = /^!ifsoul (allow|deny)-(history|app-chat)$/.exec(message);
     if (command) {
       const consent = command[1] === "allow";
@@ -241,7 +336,7 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
         .then(
           () => {
             if (ready && !stopped && epoch === consentEpoch && binding(name))
-              bot.whisper(
+              void whisper(
                 name,
                 history
                   ? consent
@@ -254,7 +349,7 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
           },
           () => {
             if (ready && !stopped && epoch === consentEpoch && binding(name))
-              bot.whisper(
+              void whisper(
                 name,
                 history
                   ? "The history permission could not be changed."
@@ -295,6 +390,7 @@ export function attachConnector(bot, config, transport, receipt = () => {}) {
       invalidate("stop");
       for (const [name, fn] of listeners) bot.removeListener(name, fn);
     },
+    validateActiveMovement: () => checkMovement(typedMovement),
     status() {
       return {
         epoch,

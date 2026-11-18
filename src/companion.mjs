@@ -8,6 +8,8 @@ import mineflayer from "mineflayer";
 import { BridgeRequestError } from "@ifsoul/adapter-sdk/bridge";
 import { loadActionPlugins } from "./actions.mjs";
 import { attachConnector } from "./connector.mjs";
+import { mineflayerManifest } from "./capabilities.mjs";
+import { validateResourcePolicy } from "./resources.mjs";
 const clean = (code, message) => ({ error: { code, message } });
 const same = (a, b) =>
   typeof a === "string" &&
@@ -101,6 +103,14 @@ export async function startCompanion(options = {}) {
         "Stored companion configuration unsupported; existing file was not changed",
       );
   }
+  let resourcePolicy;
+  try {
+    resourcePolicy = validateResourcePolicy(JSON.parse(
+      await readFile(resolve(directory, "resource-policy.json"), "utf8"),
+    ));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   let authorizedPrincipalId,
     approvedOrigin,
     pairCode = randomBytes(12).toString("base64url"),
@@ -149,14 +159,15 @@ export async function startCompanion(options = {}) {
     await rename(tmp, resolve(directory, "connection.json"));
     await chmod(resolve(directory, "connection.json"), 0o600);
   }
-  async function remote(path, body, credential = config?.token) {
-    const endpoint = serviceOrigin(config.serviceEndpoint);
+  async function remote(path, body, credential = config?.token, originOverride) {
+    const endpoint = originOverride ?? serviceOrigin(config.serviceEndpoint);
     const check = body.operation === "action-check";
+    const report = body.operation === "action-report";
     const response = await fetch(endpoint + "/api/game/device/" + path, {
       method: "POST",
       redirect: "error",
       signal:
-        path === "ready" || path === "dialogue"
+        !report && (path === "ready" || path === "dialogue")
           ? AbortSignal.any([
               activeRequest.signal,
               AbortSignal.timeout(
@@ -201,10 +212,14 @@ export async function startCompanion(options = {}) {
     }
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   }
-  let actionLease;
+  let actionLease, capabilityLease, invalidateCapabilities;
   let activeRequest = new AbortController();
   function stop() {
     clearInterval(actionLease);
+    clearInterval(capabilityLease);
+    capabilityLease = undefined;
+    invalidateCapabilities?.();
+    invalidateCapabilities = undefined;
     actionLease = undefined;
     activeRequest.abort();
     activeRequest = new AbortController();
@@ -233,7 +248,7 @@ export async function startCompanion(options = {}) {
           hideErrors: true,
         });
     bot = current;
-    if (config.connection.actions?.includes("movement"))
+    if (resourcePolicy || config.connection.actions?.includes("movement"))
       loadActionPlugins(current);
     current.on("error", () => {
       if (generation !== epoch) return;
@@ -250,6 +265,9 @@ export async function startCompanion(options = {}) {
     current.on("end", () => {
       if (generation !== epoch) return;
       connector?.stop();
+      clearInterval(capabilityLease);
+      invalidateCapabilities?.();
+      invalidateCapabilities = undefined;
       bot = undefined;
       phase = "stopped";
     });
@@ -264,8 +282,14 @@ export async function startCompanion(options = {}) {
             (p) => p.name === config.minecraft.playerName,
           );
           if (player) {
+            const configuredActions = config.connection.actions ?? [];
+            let manifest = mineflayerManifest(
+                current, config.minecraft, resourcePolicy, 1,
+                current.players[player.name], configuredActions,
+              );
             const ready = await remote("ready", {
               player,
+              ...(manifest ? { capabilityManifest: manifest } : {}),
               ...(config.connection.actions?.includes("movement")
                 ? {
                     actionCapabilities: current.pathfinder
@@ -278,6 +302,58 @@ export async function startCompanion(options = {}) {
             config.connection = ready.connection;
             await persist();
             const actionRevision = config.connection.revision;
+            let capabilitySession = ready.connection.capability;
+            const providerCredential = config.token;
+            const providerOrigin = serviceOrigin(config.serviceEndpoint);
+            let refreshCapability;
+            if (capabilitySession) {
+              let pendingUpdate;
+              const publish = (next) => remote("capabilities", {
+                providerId: capabilitySession.providerId,
+                capabilityManifest: next,
+              }, providerCredential, providerOrigin);
+              invalidateCapabilities = () => {
+                void Promise.resolve(pendingUpdate).catch(() => {}).then(() => {
+                  if (!capabilitySession) return;
+                  const next = {
+                    ...manifest,
+                    revision: String(Number(manifest.revision) + 1),
+                    capabilities: manifest.capabilities.map((row) => ({
+                      ...row,
+                      readiness: "unavailable",
+                      reason: "The Minecraft bot disconnected.",
+                    })),
+                  };
+                  return publish(next);
+                }).catch(() => {});
+              };
+              refreshCapability = async () => {
+                if (pendingUpdate) return pendingUpdate;
+                if (!capabilitySession || generation !== epoch) return;
+                try {
+                  const bound = current.players[player.name];
+                  const next = mineflayerManifest(
+                    current, config.minecraft, resourcePolicy, Number(manifest.revision),
+                    connector?.status().ready && bound?.uuid === player.uuid ? bound : undefined, configuredActions,
+                  );
+                  // A dimension change ends this embodiment session. Advertise
+                  // unavailability under its original authenticated world.
+                  next.worldId = manifest.worldId;
+                  if (JSON.stringify(next) !== JSON.stringify(manifest)) {
+                    next.revision = String(Number(manifest.revision) + 1);
+                  }
+                  pendingUpdate = publish(next).then((reply) => {
+                    manifest = next;
+                    capabilitySession = reply.connection.capability;
+                  });
+                  await pendingUpdate;
+                } finally {
+                  pendingUpdate = undefined;
+                }
+              };
+              capabilityLease = setInterval(() => { void refreshCapability().catch(() => {}); }, 10000);
+              capabilityLease.unref();
+            }
             const validateActions = async () => {
               const proof = await remote("dialogue", {
                 operation: "action-check",
@@ -290,7 +366,47 @@ export async function startCompanion(options = {}) {
                 throw Error("stale");
             };
             const cfg = {
-              actions: config.connection.activeActions,
+              resourcePolicy,
+              capabilitySession: () => capabilitySession,
+              canReact: () => capabilitySession?.expiresAt > Date.now() &&
+                capabilitySession.channelPolicy?.channels.some((row) =>
+                  row.channel === "private" && row.listen && row.react),
+              async canListen() {
+                try {
+                  await refreshCapability?.();
+                  return generation === epoch && capabilitySession?.expiresAt > Date.now() &&
+                    capabilitySession.channelPolicy?.channels.some((row) =>
+                      row.channel === "private" && row.listen);
+                } catch {
+                  return false;
+                }
+              },
+              async canSpeak() {
+                let refreshed = false;
+                try {
+                  await refreshCapability?.();
+                  refreshed = true;
+                } catch {
+                  // A missing live policy denies delivery.
+                }
+                return refreshed && generation === epoch && capabilitySession?.expiresAt > Date.now() &&
+                  capabilitySession.channelPolicy?.channels.some((row) =>
+                    row.channel === "private" && row.speak);
+              },
+              async checkCapability(request) {
+                if (generation !== epoch || capabilitySession?.providerId !== request.providerId) return false;
+                const proof = await remote("dialogue", {
+                  operation: "action-check", ...request,
+                }, providerCredential, providerOrigin);
+                return generation === epoch && proof.authorized === true;
+              },
+              reportCapability: (report) => remote("dialogue", {
+                operation: "action-report", ...report,
+              }, providerCredential, providerOrigin),
+              capabilityReportFailed: () => {
+                if (generation === epoch) error = "Game action result could not be delivered to App.";
+              },
+              actions: manifest && !capabilitySession ? [] : config.connection.activeActions,
               validateActions,
               reportAction: (outcome) =>
                 remote("dialogue", { operation: "action-outcome", ...outcome }),
@@ -329,6 +445,9 @@ export async function startCompanion(options = {}) {
                   throw new BridgeRequestError();
                 }
                 if (generation !== epoch) throw Error("stale");
+                if (reply.unavailable === true && reply.reason === "channel-policy") {
+                  return { speech: "", choiceId: request.operation === "decide" ? "none" : "", source: "llm" };
+                }
                 return reply;
               },
               (event) => {
@@ -373,7 +492,7 @@ export async function startCompanion(options = {}) {
                 if (inFlight || !connector?.status().acting) return;
                 inFlight = true;
                 try {
-                  await validateActions();
+                  await connector.validateActiveMovement();
                 } catch {
                   if (generation === epoch) {
                     stop();

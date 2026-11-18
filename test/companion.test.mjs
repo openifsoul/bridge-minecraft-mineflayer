@@ -77,6 +77,13 @@ test("companion requires local consent, exact Host/Origin, single-use code, scop
                   connectionId: "connection",
                   hostId: "server-generated",
                   memoryId: "owned-memory",
+                  ...((req.url.endsWith("ready") || req.url.endsWith("capabilities")) && { capability: {
+                    providerId: "provider",
+                    expiresAt: Date.now() + 30000,
+                    channelPolicy: { channels: [
+                      { channel: "private", listen: true, react: true, speak: true },
+                    ] },
+                  } }),
                   character: {
                     id: "owned-profile",
                     name: "Lumen",

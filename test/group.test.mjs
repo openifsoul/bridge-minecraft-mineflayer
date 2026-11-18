@@ -79,6 +79,9 @@ test("a revised host pulse disconnects only the revoked Mineflayer member", asyn
   } finally {
     controller.abort();
     await task;
+    assert.deepEqual(receipts.filter((event) => event.event === "stopped"), [
+      { event: "stopped", reason: "external-abort" },
+    ]);
     await new Promise((resolve) => server.close(resolve));
   }
 });

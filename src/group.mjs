@@ -5,11 +5,19 @@ import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import mineflayer from "mineflayer";
 import { createActions, loadActionPlugins } from "./actions.mjs";
+import { createAdventure } from "./adventure.mjs";
 
 const names = /^[A-Za-z0-9_]{3,16}$/;
 const moves = new Set(["north", "south", "east", "west"]);
 class RevisionChanged extends Error {}
 class ReplyUnavailable extends Error {}
+class GroupRequestRejected extends Error {
+  constructor(operation, status) {
+    super("The group authorization ended.");
+    this.operation = operation;
+    this.status = status;
+  }
+}
 function localService(value) {
   const u = new URL(value);
   if (
@@ -58,7 +66,7 @@ export async function runMineflayerGroup(
       redirect: "error",
       cache: "no-store",
       signal: AbortSignal.any([
-        AbortSignal.timeout(data.operation === "dialogue" ? 32000 : 4000),
+        AbortSignal.timeout(["dialogue", "adventure-dialogue"].includes(data.operation) ? 65000 : 4000),
         activeSignal,
       ]),
       headers: {
@@ -70,16 +78,16 @@ export async function runMineflayerGroup(
     if (response.status === 409) throw new RevisionChanged();
     if (data.operation === "dialogue" && response.status >= 500)
       throw new ReplyUnavailable();
-    if (!response.ok) throw Error("The group authorization ended.");
+    if (!response.ok) throw new GroupRequestRejected(data.operation, response.status);
     return response.json();
   }
   const members = new Map();
   const pendingReports = [];
-  const end = (reason) => {
-    if (!stop.signal.aborted) {
-      stop.abort(reason);
-      receipt({ event: "stopped" });
-    }
+  let shutdown;
+  const end = (reason, detail = {}) => {
+    if (stop.signal.aborted) return;
+    shutdown = { reason, ...detail };
+    stop.abort();
   };
   let leaseUntil = 0;
   let authorizeMovement = false;
@@ -90,6 +98,14 @@ export async function runMineflayerGroup(
   const playerSeen = (bot) =>
     !!group.player &&
     bot.players?.[group.player.name]?.uuid === group.player.uuid;
+  const adventure = createAdventure(options.adventure, {
+    members, call, signal, playerSeen, receipt,
+    server: options.server,
+    group: () => group,
+    revision: () => revision,
+    active: () => !signal.aborted && Date.now() < leaseUntil,
+    isRevisionChange: (error) => error instanceof RevisionChanged,
+  });
   const pauseForRevision = () => {
     authorizeMovement = false;
     leaseUntil = 0;
@@ -114,6 +130,7 @@ export async function runMineflayerGroup(
     for (const [name, actor] of members) {
       if (pulse.botNames.includes(name)) continue;
       members.delete(name);
+      adventure?.stop(actor, "member-revoked");
       actor.bot.quit();
       receipt({ event: "member-revoked", name, revision });
     }
@@ -164,16 +181,20 @@ export async function runMineflayerGroup(
     bot.on("physicsTick", () => actor.actions.tick());
     bot.on("goal_reached", (goal) => actor.actions.reached(goal));
     bot.on("path_update", (result) => actor.actions.path(result));
-    const lost = (message) => {
-      if (members.has(name)) end(new Error(message));
+    const lost = (reason) => {
+      if (members.has(name)) end(reason, { name });
     };
-    bot.on("end", () => lost("A group member disconnected."));
-    bot.on("error", () => lost("A group member lost its server connection."));
-    bot.on("death", () => lost("A group member cannot continue."));
+    bot.on("end", () => lost("member-disconnected"));
+    bot.on("error", () => lost("member-connection-error"));
+    bot.on("death", () => lost("member-died"));
     bot.on("respawn", () => {
-      if (actor.ready) lost("A group member changed its world.");
+      if (actor.ready) lost("member-world-changed");
+    });
+    if (adventure && bot._client) bot._client.on("playerChat", (packet) => {
+      adventure.playerMessage(name, packet);
     });
     bot.on("whisper", (username, message) => {
+      if (adventure) return;
       if (
         !members.has(name) ||
         username !== group.player?.name ||
@@ -271,6 +292,7 @@ export async function runMineflayerGroup(
         group.botNames.length
     )
       throw Error("The group grant is invalid.");
+    if (adventure && group.botNames.length !== 3) throw Error("Choose an adventure group with three NPCs.");
     token = group.token;
     revision = group.revision;
     for (const name of group.botNames) attach(name);
@@ -300,13 +322,16 @@ export async function runMineflayerGroup(
           throw Error("Group lease is unavailable.");
         leaseUntil = receivedAt + pulse.leaseMs;
         authorizeMovement = pulse.canMove === true;
+        for (const [name, actor] of members) {
+          if (adventure) void adventure.sync(name, actor);
+        }
         if (!running())
           for (const actor of members.values()) actor.actions.stop();
         while (pendingReports.length) {
           await call(pendingReports[0]);
           pendingReports.shift();
         }
-        if (running()) {
+        if (running() && !adventure) {
           const proposal = await call({ operation: "assignment" });
           if (
             !Array.isArray(proposal.assignments) ||
@@ -362,13 +387,24 @@ export async function runMineflayerGroup(
       await delay(500, undefined, { signal });
     }
   } catch (error) {
-    if (!signal.aborted) throw error;
+    if (!signal.aborted) {
+      if (error instanceof GroupRequestRejected) {
+        end("app-request-rejected", { operation: error.operation, status: error.status });
+      } else {
+        end("runner-failed");
+      }
+      throw error;
+    }
   } finally {
-    end();
+    const externalReason = ["SIGINT", "SIGTERM"].includes(stopSignal?.reason) ? stopSignal.reason : "external-abort";
+    end(stopSignal?.aborted ? externalReason : "completed");
+    receipt({ event: "stopped", ...shutdown });
     for (const actor of members.values()) {
       actor.actions?.stop();
+      adventure?.stop(actor, "stopped");
       actor.bot.quit();
     }
+    await adventure?.drain();
     if (token)
       await call({ operation: "disconnect" }, AbortSignal.timeout(1000)).catch(
         () => {},
@@ -381,8 +417,8 @@ if (
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href
 ) {
   const stop = new AbortController();
-  process.once("SIGINT", () => stop.abort());
-  process.once("SIGTERM", () => stop.abort());
+  process.once("SIGINT", () => stop.abort("SIGINT"));
+  process.once("SIGTERM", () => stop.abort("SIGTERM"));
   try {
     const options = JSON.parse(await readFile(process.argv[2], "utf8"));
     await runMineflayerGroup(options, {

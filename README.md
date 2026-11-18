@@ -136,6 +136,12 @@ this checkout on the same computer as the App.
 pnpm group /path/to/group.json
 ```
 
+Keep the group host running for the whole play session. Its stop receipt
+reports whether a signal arrived, a member disconnected, or the App rejected
+a group request. Restart with a fresh setup code from the App. Select the same
+character memories to keep the adventure conversation available. Set approved
+return points explicitly if actors reconnect somewhere other than home.
+
 The group host runs the authorized clients in the same trusted Minecraft
 Java 1.20.2 world. Each bot's pathfinder executes its own bounded survey step
 and reports the observed result to the App. Each member retains its own
@@ -152,3 +158,99 @@ Linked Conversation can use this connection's private history and update the
 character's relationship with that player. Withdraw this permission with
 `!ifsoul deny-app-chat`. Owner history inspection has a separate grant. See
 the [App memory guide](https://github.com/openifsoul/app/blob/main/docs/memory.md#continue-as-a-mineflayer-player-in-conversation).
+
+## Gather logs into an approved chest
+
+The companion can collect configured log types and deposit only the newly
+collected quantity into one approved single chest. Use a trusted server and a
+server-managed area where this actor may break the approved blocks and use the
+chest. Server protections continue to apply.
+
+Place `resource-policy.json` in the companion data directory
+(`~/.ifsoul/minecraft` by default or `IFSOUL_COMPANION_DATA_DIR`) before
+starting the companion. Keep this file under the game operator's control.
+For example:
+
+```json
+{
+  "dimension": "overworld",
+  "region": {
+    "min": { "x": -2, "y": -61, "z": -2 },
+    "max": { "x": 14, "y": -56, "z": 6 }
+  },
+  "resources": ["oak_log", "birch_log"],
+  "containers": [
+    { "id": "main", "position": { "x": 12, "y": -60, "z": 3 } }
+  ]
+}
+```
+
+Use the dimension reported by your Mineflayer session and coordinates for
+the permitted region and chest in that world. The bot needs an axe, space
+for the drops and a path within the region. Pair the companion, connect the
+bot while the bound player is online and allow `minecraft.gather-deposit`
+in App's connection capabilities. The bound player can then privately send
+`!ifsoul gather oak_log 8 main` to the bot. The count can be 1–32 and the
+resource and chest must match the local policy. Send `!ifsoul stop` or
+`!ifsoul wait` to stop subsequent actions. App also checks the permission
+before each step and while the action is active.
+
+A pickup requires the bot's collection event and an inventory increase.
+The bot reopens the selected chest to verify each deposited item against
+the container and inventory counts. A cancelled or partial result reports
+the effects the host could verify. Already completed server effects persist
+and the bridge does not restart a cancelled job. Use an isolated approved
+area when multiple players could modify nearby blocks or the same chest.
+
+Mineflayer also exposes bounded approach, follow, cardinal movement and
+defense against supported hostile mobs when those local action plugins and
+permissions are enabled. The current bridge has no standalone inventory
+commands, crafting, cooking, building, or delegation of work to another NPC.
+
+## Three NPCs in adventure chat
+
+Use a group with three NPCs and opt into public chat both in App and in the
+group launcher configuration. Add an `adventure` object beside the group
+server and setup code. Set `publicChat` to `true` and supply a `forest`
+object with `dimension`, `resources`, `region` and `harvestRegion`.
+Both regions use inclusive block coordinates with a `min` and `max`
+point. The harvest region must fit inside the movement region. Give each
+NPC an axe before the adventure. Allow `minecraft.gather-logs` for each
+NPC in App to let it act on the player's instructions.
+
+The group can hear public messages from the selected player when that
+player is tracked in its current dimension. Vanilla public chat delivers to
+the whole server, so the adventure bridge exposes public listening and
+reaction with public speaking disabled. Enable the App's private reply route
+to send a response only to the paired player. NPC replies and unrelated
+players' messages do not start another turn. The selected player can stop
+group tasks with `!group stop` or whisper `!ifsoul stop` to stop one NPC's task.
+
+Each bot reserves a separate work area around its selected block while
+collecting its drop and keeps the logs it picks up. Group progress comes
+from each bot's own observed pickup and inventory counts.
+
+App can control listening, reacting and speaking separately for each supported
+chat channel. The companion and individual bridge provide private dialogue.
+The adventure bridge supports scoped group chat and opt-in public input.
+Each reply requires current authorization for its destination. A private
+reply goes only to the paired Minecraft player.
+
+To return together, allow `minecraft.return-from-forest` for each NPC in App.
+The adventure bridge records each NPC’s first valid position in the travel
+region as its return point. An operator can set `adventure.returnPoints` to a
+map of NPC names to safe positions within that region. A return uses ordinary
+native walking and reports arrival only when the NPC reaches its assigned
+point. It does not move or teleport the player.
+
+### Group chat with limited recipients
+
+To reach the group without using public chat, whisper
+`!group <message>` to the first NPC in the configured group. App can
+enable listening, reacting and speaking independently for this channel.
+Messages and replies appear as private Minecraft packets. Group replies
+use the `[Group]` prefix and go only to the bound player and verified group
+members allowed to listen. A directed reply requires its NPC recipient
+to be an authorized listener. A public player message remains on the
+public channel, subject to its separate settings. Send `!group stop`
+to the first NPC to stop the group’s active tasks.
